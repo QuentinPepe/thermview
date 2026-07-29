@@ -1,0 +1,100 @@
+name: Release Windows executable
+
+# Pushing a version tag builds the portable exe and publishes it as a release
+# asset. Nothing else triggers this, so ordinary commits stay cheap.
+on:
+  push:
+    tags:
+      - 'v*'
+  # Lets you rehearse the build without cutting a release.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      # Keyed on the lockfile so dependency bumps invalidate it, and scoped to
+      # the registry plus build outputs — the bulk of a cold Tauri build.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install npm dependencies
+        run: npm install
+
+      # Keep the built artifact's version in step with the tag instead of
+      # letting tauri.conf.json drift out of date.
+      - name: Sync version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $path = 'src-tauri/tauri.conf.json'
+          $conf = Get-Content $path -Raw | ConvertFrom-Json
+          $conf.version = $version
+          $conf | ConvertTo-Json -Depth 20 | Set-Content $path -Encoding utf8
+          Write-Host "tauri.conf.json version set to $version"
+
+      - name: Build portable executable
+        run: npm run desktop
+
+      - name: Name the asset
+        id: asset
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          $version = if ($ref.StartsWith('v')) { $ref.TrimStart('v') } else { "dev-$($env:GITHUB_SHA.Substring(0,7))" }
+          $name = "ThermView-$version-windows-x64.exe"
+          Copy-Item 'src-tauri/target/release/thermview.exe' $name
+          "name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host ("built {0} ({1:N2} MB)" -f $name, ((Get-Item $name).Length / 1MB))
+
+      # Always keep the binary retrievable, tag or manual run.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-executable
+          path: ${{ steps.asset.outputs.name }}
+          if-no-files-found: error
+
+      # Notes go through a file with a literal here-string: a double-quoted one
+      # would treat markdown backticks as PowerShell escapes.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ASSET: ${{ steps.asset.outputs.name }}
+        run: |
+          @'
+          Portable Windows build — a single executable, no installer.
+
+          **Download the .exe below, then double-click it.** Nothing is
+          installed and no files are written outside the folder you put it in.
+          Every thermal image is decoded locally; the app never needs a network
+          connection.
+
+          Requires the WebView2 runtime, which ships with Windows 11 and with
+          any up-to-date Windows 10. See DESKTOP.md if the app reports it is
+          missing.
+          '@ | Set-Content release-notes.md -Encoding utf8
+          gh release create $env:TAG $env:ASSET --title "ThermView $env:TAG" --notes-file release-notes.md
