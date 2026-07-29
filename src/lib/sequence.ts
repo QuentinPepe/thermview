@@ -62,10 +62,15 @@ export function formatTimestamp(ts: number | null): string {
   });
 }
 
-/** "+2m30s" style elapsed-time label relative to the first frame. */
+/** "+2m30s" / "+3h05m" / "+2d4h" style elapsed-time label relative to the first frame. */
 export function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
-  const m = Math.floor(s / 60);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
   const rem = s % 60;
-  return m > 0 ? `+${m}m${rem.toString().padStart(2, '0')}s` : `+${rem}s`;
+  if (d > 0) return `+${d}d${h}h`;
+  if (h > 0) return `+${h}h${m.toString().padStart(2, '0')}m`;
+  if (m > 0) return `+${m}m${rem.toString().padStart(2, '0')}s`;
+  return `+${rem}s`;
 }

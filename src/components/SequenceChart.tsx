@@ -100,9 +100,12 @@ export function SequenceChart({ frames, currentIdx, tempUnit, onSeek }: {
     }
 
     // --- X labels: elapsed time (or image index) at first / middle / last ---
+    // Drop the middle label when uneven spacing pushes it against an edge label
     ctx.textBaseline = 'top';
+    const midIdx = Math.floor((frames.length - 1) / 2);
+    const midClear = xPos(midIdx) - xPos(0) > 70 && xPos(frames.length - 1) - xPos(midIdx) > 70;
     const labelIdxs = frames.length > 2
-      ? [0, Math.floor((frames.length - 1) / 2), frames.length - 1]
+      ? (midClear ? [0, midIdx, frames.length - 1] : [0, frames.length - 1])
       : frames.map((_, i) => i);
     const t0 = frames[0].timestamp;
     for (const i of labelIdxs) {
