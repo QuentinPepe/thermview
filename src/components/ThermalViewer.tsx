@@ -1,15 +1,19 @@
-import { useState, useRef, useCallback, useMemo } from 'react';
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { parseThermalImage } from '@/lib/format-detector';
-import { createTempCanvas } from '@/lib/irg-parser';
 import type { RenderOpts } from '@/lib/irg-parser';
 import { recomputeThermalImage } from '@/lib/calibration';
 import { CURSOR_COLORS, PALETTES, OVERSCAN_OPTIONS } from '@/lib/constants';
 import { toUnit } from '@/lib/units';
 import type { MeasurementCursor, OverlayConfig, FileInfo, TempUnit, Overscan, ScaleMode, Palette, ThermalImage } from '@/lib/types';
 import { extractExifMeta } from '@/lib/types';
+import { buildSequence, meanTemp } from '@/lib/sequence';
+import type { SequenceFrame } from '@/lib/sequence';
 import { ThermalCanvas } from '@/components/ThermalCanvas';
 import { RangeColorBar } from '@/components/RangeColorBar';
 import { CursorPanel } from '@/components/CursorPanel';
+import { SequencePanel } from '@/components/SequencePanel';
+import { SequenceChart } from '@/components/SequenceChart';
+import { SequenceStats } from '@/components/SequenceStats';
 
 function StatPill({ label, value }: { label: string; value: string }) {
   return (
@@ -83,7 +87,12 @@ function CalibrationEditor(p: CalibrationEditorProps) {
 }
 
 export function ThermalViewer() {
-  const [thermalImage, setThermalImage] = useState<ThermalImage | null>(null);
+  const [rawFrames, setRawFrames] = useState<SequenceFrame[]>([]);
+  const [currentIdx, setCurrentIdx] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [loop, setLoop] = useState(true);
+  const [frameMs, setFrameMs] = useState(1000);
+  const [globalScale, setGlobalScale] = useState(true);
   const [palette, setPalette] = useState<Palette>('inferno');
   const [tempUnit, setTempUnit] = useState<TempUnit>('C');
   const [scaleMode, setScaleMode] = useState<ScaleMode>('linear');
@@ -96,7 +105,6 @@ export function ThermalViewer() {
   const [hoverTemp, setHoverTemp] = useState<number | null>(null);
   const [cursors, setCursors] = useState<MeasurementCursor[]>([]);
   const [overlay, setOverlay] = useState<OverlayConfig>({ showMinMaxSpots: true, showEmissivity: true, showTimestamp: true });
-  const [fileInfo, setFileInfo] = useState<FileInfo>({ name: '', modified: null });
 
   // Editable calibration params (initialised from file defaults)
   const [editEmissivity, setEditEmissivity] = useState(0.95);
@@ -109,75 +117,173 @@ export function ThermalViewer() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const exportCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const renderOpts: RenderOpts = useMemo(() => ({
-    palette, minC: rangeMin, maxC: rangeMax, overscan, scaleMode,
-    belowColor: [0, 0, 128] as [number, number, number],
-    aboveColor: [255, 255, 255] as [number, number, number],
-    inverted,
-    cdfLut: thermalImage?.cdfLut ?? undefined,
-  }), [palette, rangeMin, rangeMax, overscan, scaleMode, inverted, thermalImage?.cdfLut]);
-
-  // Apply calibration edits: if isRecomputable, recompute; otherwise use as-is
-  const activeImage = useMemo(() => {
-    if (!thermalImage) return null;
-    return recomputeThermalImage(thermalImage, {
+  // Apply calibration edits to every frame; skipped when params match the file
+  // defaults or the format is not recomputable, so this is free in the common case
+  const frames = useMemo(() => rawFrames.map(f => {
+    const img = f.image;
+    const unchanged =
+      Math.abs(editEmissivity - img.emissivity) < 1e-6 &&
+      Math.abs(editDistance - img.distance) < 1e-6 &&
+      Math.abs(editRefTemp - img.refTemp) < 1e-6 &&
+      Math.abs(editAirTemp - img.airTemp) < 1e-6 &&
+      Math.abs(editHumidity - img.humidity) < 1e-6;
+    if (unchanged || !img.isRecomputable) return f;
+    const re = recomputeThermalImage(img, {
       emissivity: editEmissivity,
       distance: editDistance,
       refTemp: editRefTemp,
       airTemp: editAirTemp,
       humidity: editHumidity,
     });
-  }, [thermalImage, editEmissivity, editDistance, editRefTemp, editAirTemp, editHumidity]);
+    return { ...f, image: re, mean: meanTemp(re) };
+  }), [rawFrames, editEmissivity, editDistance, editRefTemp, editAirTemp, editHumidity]);
 
-  const renderedCanvas = useMemo(() => {
-    if (!activeImage) return null;
-    return createTempCanvas(activeImage.celsius, activeImage.width, activeImage.height, renderOpts);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeImage?.celsius, renderOpts]); // implicitly depends on image dimensions
+  const isSequence = frames.length > 1;
+  const activeFrame = frames[currentIdx] ?? null;
+  const activeImage = activeFrame?.image ?? null;
 
-  const processFile = useCallback((buf: ArrayBuffer, fileName?: string, modified?: number | null) => {
-    try {
-      const img = parseThermalImage(buf, fileName, modified);
-      setThermalImage(img);
-      setRangeMin(img.dataMin);
-      setRangeMax(img.dataMax);
+  // Global min/max over the whole series — the comparable-colors lock
+  const globalRange = useMemo(() => {
+    let lo = Infinity, hi = -Infinity;
+    for (const f of frames) {
+      if (f.image.dataMin < lo) lo = f.image.dataMin;
+      if (f.image.dataMax > hi) hi = f.image.dataMax;
+    }
+    return Number.isFinite(lo) ? { min: lo, max: hi } : null;
+  }, [frames]);
 
-      // ── Enrich with EXIF metadata (async, non-blocking) ────────────
-      extractExifMeta(buf).then(meta => {
+  const lockScale = globalScale && isSequence && globalRange !== null;
+  const barMin = lockScale ? globalRange!.min : activeImage?.dataMin ?? 0;
+  const barMax = lockScale ? globalRange!.max : activeImage?.dataMax ?? 0;
+
+  const fileInfo: FileInfo = useMemo(() => activeFrame
+    ? { name: activeFrame.image.fileName, modified: activeFrame.timestamp }
+    : { name: '', modified: null }, [activeFrame]);
+
+  const renderOpts: RenderOpts = useMemo(() => ({
+    palette, minC: rangeMin, maxC: rangeMax, overscan, scaleMode,
+    belowColor: [0, 0, 128] as [number, number, number],
+    aboveColor: [255, 255, 255] as [number, number, number],
+    inverted,
+    cdfLut: activeImage?.cdfLut ?? undefined,
+  }), [palette, rangeMin, rangeMax, overscan, scaleMode, inverted, activeImage?.cdfLut]);
+
+  // Thumbnail render opts: pinned to the global range so timeline strips stay
+  // stable while the user drags the range handles
+  const thumbOpts: RenderOpts = useMemo(() => ({
+    palette, minC: globalRange?.min ?? 0, maxC: globalRange?.max ?? 1, overscan, scaleMode,
+    belowColor: [0, 0, 128] as [number, number, number],
+    aboveColor: [255, 255, 255] as [number, number, number],
+    inverted,
+  }), [palette, globalRange, overscan, scaleMode, inverted]);
+
+  // Cursors follow the sequence: same pixel, re-sampled on the current image
+  const displayCursors = useMemo(() => {
+    if (!activeImage) return cursors;
+    return cursors.map(c => {
+      if (c.x < 0 || c.y < 0 || c.x >= activeImage.width || c.y >= activeImage.height) return c;
+      return { ...c, tempC: activeImage.celsius[c.y * activeImage.width + c.x] };
+    });
+  }, [cursors, activeImage]);
+
+  const processFiles = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    const errors: string[] = [];
+    const images: ThermalImage[] = [];
+    await Promise.all(files.map(async f => {
+      try {
+        const buf = await f.arrayBuffer();
+        const img = parseThermalImage(buf, f.name, f.lastModified);
+        // EXIF is awaited up-front here: capture dates are needed to sort the sequence
+        const meta = await extractExifMeta(buf);
         if (meta) {
-          setThermalImage(prev => prev && { ...prev, cameraInfo: meta.cameraInfo, captureDate: meta.captureDate });
+          img.cameraInfo = meta.cameraInfo;
+          img.captureDate = meta.captureDate;
         }
-      });
+        images.push(img);
+      } catch (err) {
+        errors.push(`${f.name}: ${(err as Error).message}`);
+      }
+    }));
+    if (errors.length) alert(`Failed to parse ${errors.length} file(s):\n${errors.join('\n')}`);
+    if (!images.length) return;
 
-      // Show timestamp: prefer EXIF capture date, fall back to file mtime, else nothing
-      const dateStr = img.captureDate
-        ? new Date(img.captureDate + 'Z').getTime()
-        : modified ?? null;
-      setFileInfo({ name: img.fileName, modified: dateStr });
+    const seq = buildSequence(images);
+    setRawFrames(seq);
+    setCurrentIdx(0);
+    setPlaying(false);
+    setCursors([]);
+    setGlobalScale(true);
 
-      // Reset editable params to file defaults
-      setEditEmissivity(img.emissivity);
-      setEditDistance(img.distance);
-      setEditRefTemp(img.refTemp);
-      setEditAirTemp(img.airTemp);
-      setEditHumidity(img.humidity);
-    } catch (err) { alert('Failed to parse thermal image: ' + (err as Error).message); }
+    // Lock the range to the global series min/max so colors are comparable
+    let lo = Infinity, hi = -Infinity;
+    for (const fr of seq) {
+      lo = Math.min(lo, fr.image.dataMin);
+      hi = Math.max(hi, fr.image.dataMax);
+    }
+    setRangeMin(lo);
+    setRangeMax(hi);
+
+    const first = seq[0].image;
+    setEditEmissivity(first.emissivity);
+    setEditDistance(first.distance);
+    setEditRefTemp(first.refTemp);
+    setEditAirTemp(first.airTemp);
+    setEditHumidity(first.humidity);
   }, []);
 
   const upload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]; if (!f) return;
-    const r = new FileReader();
-    r.onload = ev => processFile(ev.target!.result as ArrayBuffer, f.name, f.lastModified);
-    r.readAsArrayBuffer(f);
-  }, [processFile]);
+    processFiles(Array.from(e.target.files ?? []));
+  }, [processFiles]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-    const f = e.dataTransfer.files?.[0]; if (!f) return;
-    const r = new FileReader();
-    r.onload = ev => processFile(ev.target!.result as ArrayBuffer, f.name, f.lastModified);
-    r.readAsArrayBuffer(f);
-  }, [processFile]);
+    processFiles(Array.from(e.dataTransfer.files ?? []));
+  }, [processFiles]);
+
+  // Jump to an image; in per-image scale mode, re-range to that image's min/max
+  const seek = useCallback((idx: number) => {
+    const clamped = Math.max(0, Math.min(frames.length - 1, idx));
+    setCurrentIdx(clamped);
+    if (!globalScale && frames.length > 1) {
+      const img = frames[clamped]?.image;
+      if (img) {
+        setRangeMin(img.dataMin);
+        setRangeMax(img.dataMax);
+      }
+    }
+  }, [frames, globalScale]);
+
+  // Playback: advance on an interval; stop at the end unless looping.
+  // The tick handler lives in a ref so the interval isn't reset on every seek.
+  const advanceRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    advanceRef.current = () => {
+      const next = currentIdx + 1;
+      if (next < frames.length) seek(next);
+      else if (loop) seek(0);
+      else setPlaying(false);
+    };
+  });
+  useEffect(() => {
+    if (!playing || frames.length < 2) return;
+    const id = setInterval(() => advanceRef.current(), frameMs);
+    return () => clearInterval(id);
+  }, [playing, frames.length, frameMs]);
+
+  const toggleGlobalScale = useCallback(() => {
+    setGlobalScale(g => {
+      const next = !g;
+      if (next && globalRange) {
+        setRangeMin(globalRange.min);
+        setRangeMax(globalRange.max);
+      } else if (activeImage) {
+        setRangeMin(activeImage.dataMin);
+        setRangeMax(activeImage.dataMax);
+      }
+      return next;
+    });
+  }, [globalRange, activeImage]);
 
   const addCursor = useCallback((x: number, y: number, tempC: number) => {
     const id = ++cursorIdRef.current;
@@ -190,17 +296,22 @@ export function ThermalViewer() {
     setCursors(prev => prev.map(c => c.id === id ? { ...c, label } : c)), []);
 
   const clear = useCallback(() => {
-    setThermalImage(null);
+    setRawFrames([]);
+    setCurrentIdx(0);
+    setPlaying(false);
     setCursors([]);
-    setFileInfo({ name: '', modified: null });
     setOverlay({ showMinMaxSpots: true, showEmissivity: true, showTimestamp: true });
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
   const autoRange = () => {
-    if (!activeImage) return;
-    setRangeMin(activeImage.dataMin);
-    setRangeMax(activeImage.dataMax);
+    if (lockScale) {
+      setRangeMin(globalRange!.min);
+      setRangeMax(globalRange!.max);
+    } else if (activeImage) {
+      setRangeMin(activeImage.dataMin);
+      setRangeMax(activeImage.dataMax);
+    }
   };
   const range20_40 = () => { setRangeMin(20); setRangeMax(40); };
   const range0_80 = () => { setRangeMin(0); setRangeMax(80); };
@@ -234,17 +345,18 @@ export function ThermalViewer() {
         </div>
       </header>
 
-      {!thermalImage ? (
+      {!activeImage ? (
         <div onDragOver={e => e.preventDefault()} onDrop={handleDrop} onClick={() => fileInputRef.current?.click()}
           className="relative group cursor-pointer border-2 border-dashed border-thermal-border rounded-2xl p-12 flex flex-col items-center gap-4 hover:border-thermal-accent/40 transition-colors duration-300">
-          <input ref={fileInputRef} type="file" accept=".irg,.jpg,.jpeg,.img" onChange={upload} className="hidden" />
+          <input ref={fileInputRef} type="file" accept=".irg,.jpg,.jpeg,.img" multiple onChange={upload} className="hidden" />
           <div className="size-16 rounded-2xl bg-thermal-surface flex items-center justify-center group-hover:bg-thermal-accent/10 transition-colors">
             <svg className="size-7 text-thermal-muted group-hover:text-thermal-accent transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
             </svg>
           </div>
-          <p className="font-display text-sm text-thermal-heading">Drop thermal image here</p>
+          <p className="font-display text-sm text-thermal-heading">Drop thermal image(s) here</p>
           <p className="text-xs text-thermal-muted mt-1">IRG, Hikmicro, DJI, FLIR R-JPEG, FLIR .img — drag or click to browse</p>
+          <p className="text-xs text-thermal-muted">Drop several images taken over time to analyze a temperature sequence</p>
         </div>
       ) : (
         <>
@@ -363,42 +475,63 @@ export function ThermalViewer() {
                 <span className="ml-1">°{tempUnit}</span>
               </span>
               <span className="ml-auto text-[0.6rem] text-thermal-muted font-display">
-                File: {toUnit(thermalImage.dataMin, tempUnit)}–{toUnit(thermalImage.dataMax, tempUnit)}°{tempUnit}
+                Image: {toUnit(activeImage.dataMin, tempUnit)}–{toUnit(activeImage.dataMax, tempUnit)}°{tempUnit}
+                {lockScale && (
+                  <span className="ml-2">Series: {toUnit(globalRange!.min, tempUnit)}–{toUnit(globalRange!.max, tempUnit)}°{tempUnit}</span>
+                )}
               </span>
             </div>
+
+            {isSequence && (
+              <SequencePanel
+                frames={frames} currentIdx={currentIdx}
+                playing={playing} loop={loop} frameMs={frameMs} globalScale={globalScale}
+                onSeek={seek}
+                onPlayToggle={() => setPlaying(p => !p)}
+                onLoopToggle={() => setLoop(l => !l)}
+                onFrameMs={setFrameMs}
+                onGlobalScaleToggle={toggleGlobalScale}
+                renderOpts={thumbOpts}
+              />
+            )}
           </div>
 
-          {thermalImage && renderedCanvas && (
-            <div className="flex items-stretch gap-3" style={{ flexWrap: 'nowrap', minWidth: 'min-content' }}>
-              <RangeColorBar palette={palette} scaleMode={scaleMode}
-                dataMin={activeImage!.dataMin} dataMax={activeImage!.dataMax}
-                rangeMin={rangeMin} rangeMax={rangeMax} tempUnit={tempUnit}
-                height={displayH || 300} inverted={inverted}
-                onMinChange={setRangeMin} onMaxChange={setRangeMax} />
-              <div className="relative flex-1 overflow-visible" style={{ minWidth: 'min-content' }}>
-                <ThermalCanvas
-                  image={activeImage!}
-                  renderOpts={renderOpts} cursors={cursors}
-                  scale={effectiveScale} tempUnit={tempUnit}
-                  labelScale={labelScale}
-                  overlay={overlay}
-                  fileInfo={fileInfo}
-                  onCursorAdd={addCursor}
-                  onHover={setHoverTemp}
-                  exportRef={exportCanvasRef}
-                />
-                {hoverTemp !== null && (
-                  <div className="absolute top-2 right-2 pointer-events-none bg-black/80 backdrop-blur-sm border border-white/10 rounded px-2 py-1 font-display text-xs text-white z-20">
-                    {toUnit(hoverTemp, tempUnit)}°{tempUnit}
-                  </div>
-                )}
-              </div>
-              <CursorPanel cursors={cursors} tempUnit={tempUnit} labelScale={labelScale}
-                onRename={renameCursor} onDelete={removeCursor} onLabelScaleChange={setLabelScale} />
+          <div className="flex items-stretch gap-3" style={{ flexWrap: 'nowrap', minWidth: 'min-content' }}>
+            <RangeColorBar palette={palette} scaleMode={scaleMode}
+              dataMin={barMin} dataMax={barMax}
+              rangeMin={rangeMin} rangeMax={rangeMax} tempUnit={tempUnit}
+              height={displayH || 300} inverted={inverted}
+              onMinChange={setRangeMin} onMaxChange={setRangeMax} />
+            <div className="relative flex-1 overflow-visible" style={{ minWidth: 'min-content' }}>
+              <ThermalCanvas
+                image={activeImage}
+                renderOpts={renderOpts} cursors={displayCursors}
+                scale={effectiveScale} tempUnit={tempUnit}
+                labelScale={labelScale}
+                overlay={overlay}
+                fileInfo={fileInfo}
+                onCursorAdd={addCursor}
+                onHover={setHoverTemp}
+                exportRef={exportCanvasRef}
+              />
+              {hoverTemp !== null && (
+                <div className="absolute top-2 right-2 pointer-events-none bg-black/80 backdrop-blur-sm border border-white/10 rounded px-2 py-1 font-display text-xs text-white z-20">
+                  {toUnit(hoverTemp, tempUnit)}°{tempUnit}
+                </div>
+              )}
+            </div>
+            <CursorPanel cursors={displayCursors} tempUnit={tempUnit} labelScale={labelScale}
+              onRename={renameCursor} onDelete={removeCursor} onLabelScaleChange={setLabelScale} />
+          </div>
+
+          {isSequence && (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+              <SequenceChart frames={frames} currentIdx={currentIdx} tempUnit={tempUnit} onSeek={seek} />
+              <SequenceStats frames={frames} currentIdx={currentIdx} tempUnit={tempUnit} onSeek={seek} />
             </div>
           )}
 
-          {thermalImage.isRecomputable && (
+          {activeImage.isRecomputable && (
             <CalibrationEditor
               emissivity={editEmissivity} distance={editDistance}
               refTemp={editRefTemp} airTemp={editAirTemp} humidity={editHumidity}
@@ -411,12 +544,12 @@ export function ThermalViewer() {
             />
           )}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px rounded-lg overflow-hidden border border-thermal-border bg-thermal-border">
-            <StatPill label="Resolution" value={`${activeImage!.width}×${activeImage!.height}`} />
-            <StatPill label="Emissivity" value={activeImage!.emissivity.toFixed(3)} />
-            <StatPill label="Air Temp" value={`${toUnit(activeImage!.airTemp, tempUnit)}°${tempUnit}`} />
-            <StatPill label="Ref Temp" value={`${toUnit(activeImage!.refTemp, tempUnit)}°${tempUnit}`} />
-            <StatPill label="Distance" value={`${activeImage!.distance.toFixed(1)}m`} />
-            <StatPill label="Atm Trans" value={activeImage!.atmTrans.toFixed(3)} />
+            <StatPill label="Resolution" value={`${activeImage.width}×${activeImage.height}`} />
+            <StatPill label="Emissivity" value={activeImage.emissivity.toFixed(3)} />
+            <StatPill label="Air Temp" value={`${toUnit(activeImage.airTemp, tempUnit)}°${tempUnit}`} />
+            <StatPill label="Ref Temp" value={`${toUnit(activeImage.refTemp, tempUnit)}°${tempUnit}`} />
+            <StatPill label="Distance" value={`${activeImage.distance.toFixed(1)}m`} />
+            <StatPill label="Atm Trans" value={activeImage.atmTrans.toFixed(3)} />
           </div>
         </>
       )}
