@@ -71,6 +71,20 @@ bun run build      # TypeScript check + Vite production build
 bun run preview    # Preview the production build locally
 ```
 
+### Desktop app (Windows)
+
+The viewer also builds into a single portable executable — no installer, no
+runtime to set up, double-click to run. Everything stays local; the app never
+needs a network connection.
+
+```bash
+npm run desktop        # -> src-tauri/target/release/thermview.exe  (~3.6 MB)
+npm run desktop:dev    # desktop shell with hot reload
+```
+
+See [`DESKTOP.md`](DESKTOP.md) for what the recipient's machine needs and the
+packaging choices behind the build.
+
 ---
 
 ## Usage
