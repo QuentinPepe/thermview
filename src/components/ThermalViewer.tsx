@@ -99,7 +99,8 @@ export function ThermalViewer() {
   const [rangeMin, setRangeMin] = useState(0);
   const [rangeMax, setRangeMax] = useState(0);
   const [overscan, setOverscan] = useState<Overscan>('clip');
-  const [scale, setScale] = useState(3);
+  /** Zoom factor, or 'fit' to size the image to the available width */
+  const [scale, setScale] = useState<number | 'fit'>('fit');
   const [inverted, setInverted] = useState(false);
   const [labelScale, setLabelScale] = useState(10);
   const [hoverTemp, setHoverTemp] = useState<number | null>(null);
@@ -116,6 +117,17 @@ export function ThermalViewer() {
   const cursorIdRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const exportCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [rootWidth, setRootWidth] = useState(1200);
+
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setRootWidth(el.clientWidth));
+    ro.observe(el);
+    setRootWidth(el.clientWidth);
+    return () => ro.disconnect();
+  }, []);
 
   // Apply calibration edits to every frame; skipped when params match the file
   // defaults or the format is not recomputable, so this is free in the common case
@@ -317,8 +329,16 @@ export function ThermalViewer() {
   const range0_80 = () => { setRangeMin(0); setRangeMax(80); };
   const rangeNeg10_50 = () => { setRangeMin(-10); setRangeMax(50); };
 
-  // Image renders at full scaled size, can exceed viewport.
-  const effectiveScale = activeImage ? scale : 1;
+  // 'fit' sizes the image to the width left over by the color bar and cursor
+  // panel, so a 640x512 sensor doesn't overflow the viewport at 3x.
+  const SIDE_PANELS = 400;
+  const fitScale = useMemo(() => {
+    if (!activeImage) return 1;
+    const avail = Math.max(240, rootWidth - SIDE_PANELS);
+    return Math.max(0.5, Math.min(6, avail / activeImage.width));
+  }, [activeImage, rootWidth]);
+
+  const effectiveScale = activeImage ? (scale === 'fit' ? fitScale : scale) : 1;
   const displayH = activeImage ? activeImage.height * effectiveScale : 0;
 
   const download = useCallback(() => {
@@ -330,7 +350,7 @@ export function ThermalViewer() {
   }, []);
 
   return (
-    <div className="py-4 space-y-4">
+    <div ref={rootRef} className="py-4 space-y-4">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="size-2.5 rounded-full bg-thermal-hot shadow-[0_0_10px] shadow-thermal-hot/50 animate-pulse" />
@@ -383,6 +403,11 @@ export function ThermalViewer() {
               <div className="flex-1" />
               <span className="font-display text-[0.55rem] text-thermal-muted uppercase tracking-wider">Scale</span>
               <div className="flex items-center gap-1 bg-thermal-surface rounded-lg p-0.5">
+                <button onClick={() => setScale('fit')}
+                  title={`Fit the image to the window (currently ${fitScale.toFixed(1)}×)`}
+                  className={`px-2.5 py-1.5 rounded-md font-display text-[0.7rem] font-semibold transition-all ${scale === 'fit' ? 'bg-thermal-accent text-black' : 'text-thermal-muted hover:text-thermal-text'}`}>
+                  Fit
+                </button>
                 {[1,2,3,4,5,6].map(s => (
                   <button key={s} onClick={() => setScale(s)}
                     className={`px-2.5 py-1.5 rounded-md font-display text-[0.7rem] font-semibold transition-all ${scale === s ? 'bg-thermal-accent text-black' : 'text-thermal-muted hover:text-thermal-text'}`}>
