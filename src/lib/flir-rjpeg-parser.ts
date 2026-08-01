@@ -1,4 +1,4 @@
-import { decode as decodePNG } from 'fast-png';
+import { decodeRawPixels } from '@/lib/flir-fff';
 import type { ThermalImage } from '@/lib/types';
 
 /**
@@ -127,23 +127,12 @@ export function parseFLIRRJPEG(
     throw new Error(`Invalid crop dimensions: ${cropW}x${cropH}`);
   }
 
-  // ── Extract thermal PNG ──────────────────────────────────────────────
-  // PNG starts at +0x20 for newer cameras, but sometimes elsewhere.
-  // Scan for PNG magic in the record.
-  const thermalPng = extractPNGFromSlice(
-    flirData.slice(rawOff, rawOff + rawRec.length)
-  ) ?? flirData.slice(rawOff + 0x20, rawOff + rawRec.length);
-
-  // ── Decode PNG ───────────────────────────────────────────────────────
-  const rawValues = decodePNG16ToUint16(thermalPng);
-
-  // ── Fix byte order ───────────────────────────────────────────────────
-  // FLIR stores 16-bit PNG values in wrong byte order.
-  // Reference: thermal_parser/thermal.py parse_raw_data() line 297
-  for (let i = 0; i < rawValues.length; i++) {
-    const v = rawValues[i];
-    rawValues[i] = ((v >> 8) | ((v & 0xFF) << 8)) & 0xFFFF;
-  }
+  // ── Decode raw sensor values ─────────────────────────────────────────
+  // PNG (byte-swapped, most R-JPEG cameras), TIFF (SC660-era), or bare
+  // uncompressed uint16 — shared decoder with the FFF/SEQ parser.
+  const rawValues = decodeRawPixels(
+    flirData.subarray(rawOff, rawOff + rawRec.length), cropW, cropH, isLE,
+  );
 
   // ── Convert to Celsius ──────────────────────────────────────────────────
   // All R-JPEG cameras carry Planck constants in CameraInfo (type 32).
@@ -285,49 +274,6 @@ function findPlanckOR2(flirData: Uint8Array): { planckO: number | null; planckR2
   // Pick the most negative O (most likely the Planck constant)
   best.sort((a, b) => a.o - b.o);
   return { planckO: best[0].o, planckR2: best[0].r2 };
-}
-
-// ── PNG scanning / extraction ─────────────────────────────────────────────
-
-function extractPNGFromSlice(data: Uint8Array): Uint8Array | undefined {
-  const PNG_SIG = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-  for (let i = 0; i < data.length - 8; i++) {
-    if (data[i] !== 0x89) continue;
-    let match = true;
-    for (let j = 0; j < 8; j++) {
-      if (data[i + j] !== PNG_SIG[j]) { match = false; break; }
-    }
-    if (!match) continue;
-    let end = i + 8;
-    while (end + 8 <= data.length) {
-      if (end + 8 > data.length) break;
-      const chunkLen = (data[end] << 24) | (data[end + 1] << 16) |
-        (data[end + 2] << 8) | data[end + 3];
-      const chunkType = String.fromCharCode(
-        data[end + 4], data[end + 5], data[end + 6], data[end + 7],
-      );
-      const chunkTotal = 12 + chunkLen;
-      if (end + chunkTotal > data.length) break;
-      end += chunkTotal;
-      if (chunkType === 'IEND') break;
-      if (chunkLen > 50 * 1024 * 1024) break;
-    }
-    return data.slice(i, end);
-  }
-  return undefined;
-}
-
-// ── PNG decoding via fast-png ────────────────────────────────────────────
-
-function decodePNG16ToUint16(pngBytes: Uint8Array): Uint16Array {
-  const decoded = decodePNG(pngBytes);
-  if (decoded.depth !== 16 || decoded.channels !== 1) {
-    throw new Error(
-      `Expected 16-bit grayscale PNG, got depth=${decoded.depth} channels=${decoded.channels}`,
-    );
-  }
-  // data is Uint16Array for 16-bit 1-channel
-  return decoded.data as Uint16Array;
 }
 
 // ── Planck formula ────────────────────────────────────────────────────────

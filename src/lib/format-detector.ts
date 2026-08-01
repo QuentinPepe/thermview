@@ -3,6 +3,7 @@ import { parseHikmicro } from '@/lib/hikmicro-parser';
 import { parseDJI } from '@/lib/dji-parser';
 import { parseFLIR } from '@/lib/flir-parser';
 import { parseFLIRRJPEG } from '@/lib/flir-rjpeg-parser';
+import { parseFLIRSEQ } from '@/lib/flir-fff';
 import type { ThermalImage } from '@/lib/types';
 
 /** Supported file format identifiers */
@@ -17,34 +18,56 @@ export type ThermalFormat = 'irg' | 'hikmicro' | 'dji' | 'flir' | 'flir-rjpeg';
  *   - DJI: contains DJI APP3 thermal chunks + APP4 calibration
  */
 export function parseThermalImage(buffer: ArrayBuffer, fileName?: string, modified?: number | null): ThermalImage {
+  return parseThermalImages(buffer, fileName, modified)[0];
+}
+
+/**
+ * Parse a file that may contain several thermal frames.
+ *
+ * Single-image formats return one entry; a FLIR .seq video recording returns
+ * one ThermalImage per frame (evenly sampled when very long), each carrying
+ * its own FFF timestamp so the sequence UI orders and spaces them correctly.
+ */
+export function parseThermalImages(buffer: ArrayBuffer, fileName?: string, modified?: number | null): ThermalImage[] {
   const bytes = new Uint8Array(buffer);
   const format = detectFormat(bytes, fileName);
 
-  let image: ThermalImage;
+  let images: ThermalImage[];
   switch (format) {
     case 'irg':
-      image = parseIRG(buffer);
+      images = [parseIRG(buffer)];
       break;
     case 'hikmicro':
-      image = parseHikmicro(buffer);
+      images = [parseHikmicro(buffer)];
       break;
     case 'dji':
-      image = parseDJI(buffer);
+      images = [parseDJI(buffer)];
       break;
     case 'flir':
-      image = parseFLIR(buffer);
+      // Modern FFF frames (CameraInfo + Planck constants, .seq videos included),
+      // falling back to the legacy AFF decoder for SC2000-era cameras.
+      try {
+        images = parseFLIRSEQ(buffer, fileName);
+      } catch {
+        images = [parseFLIR(buffer)];
+      }
       break;
     case 'flir-rjpeg':
-      image = parseFLIRRJPEG(buffer, fileName, modified);
+      images = [parseFLIRRJPEG(buffer, fileName, modified)];
       break;
     default:
       throw new Error(`Unsupported file format${fileName ? ': ' + fileName : ''}`);
   }
 
-  image.fileName = fileName || '';
-  image.fileModified = modified ?? null;
+  for (const image of images) {
+    // Multi-frame parsers name and timestamp their own frames; fill the rest.
+    if (!image.fileName) image.fileName = fileName || '';
+    if (image.fileModified === null || image.fileModified === undefined) {
+      image.fileModified = modified ?? null;
+    }
+  }
 
-  return image;
+  return images;
 }
 
 /**
@@ -154,7 +177,7 @@ function detectFormat(bytes: Uint8Array, fileName?: string): ThermalFormat {
   if (fileName) {
     const ext = fileName.toLowerCase().split('.').pop();
     if (ext === 'irg') return 'irg';
-    if (ext === 'img' || ext === 'seq') return 'flir';
+    if (ext === 'img' || ext === 'seq' || ext === 'fff') return 'flir';
   }
 
   throw new Error('Unknown thermal image format. This file contains no recognisable radiometric data.');

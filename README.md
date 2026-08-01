@@ -102,16 +102,22 @@ packaging choices behind the build.
 
 ## File Formats
 
-### FLIR AFF/FFF (binary)
+### FLIR AFF/FFF (binary) & SEQ video
 
-FLIR's proprietary AGEMA File Format used by ThermaCAM and ResearchIR cameras.
+FLIR's proprietary AGEMA File Format used by ThermaCAM and ResearchIR cameras,
+and its `.seq` recordings — FFF frames concatenated back to back. A `.seq`
+loads as a playable time sequence, one ThermalImage per frame (evenly sampled
+past 60 frames), each with its own embedded FFF timestamp.
 
-| Camera | Resolution | Record Type | Encoding |
+| Camera | Resolution | Raw encoding | Temperature path |
 |---|---|---|---|
-| ThermaCAM PM695 | 327×245 | AFF1 (record type 1) | centi-Kelvin uint16 LE |
-| Other SC2000-style | varies | AFF1 | Planck formula |
+| Duo Pro R (.seq) | 640×512 | TIFF strips | Planck (CameraInfo record 32) |
+| ResearchIR .seq | varies | uncompressed uint16 | Planck, little-endian header |
+| ThermaCAM PM695 | 327×245 | AFF1 record | centi-Kelvin uint16 LE (legacy path) |
 
-**File structure:** `AFF\0`/`FFF\0` header → record directory → thermal data record + calibration + raw pixels.
+**File structure:** `AFF\0`/`FFF\0` header (big- or little-endian) → record
+directory → CameraInfo (type 32: Planck constants, object parameters,
+timestamp) + RawData (type 1: PNG, TIFF, or bare uint16 pixels).
 
 ### FLIR R-JPEG
 

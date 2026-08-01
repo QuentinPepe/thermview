@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
-import { parseThermalImage } from '@/lib/format-detector';
+import { parseThermalImages } from '@/lib/format-detector';
 import type { RenderOpts } from '@/lib/irg-parser';
 import { recomputeThermalImage } from '@/lib/calibration';
 import { CURSOR_COLORS, PALETTES, OVERSCAN_OPTIONS } from '@/lib/constants';
@@ -205,14 +205,17 @@ export function ThermalViewer() {
     await Promise.all(files.map(async f => {
       try {
         const buf = await f.arrayBuffer();
-        const img = parseThermalImage(buf, f.name, f.lastModified);
+        // A file may hold several frames (.seq thermal video) — flatten them all
+        const imgs = parseThermalImages(buf, f.name, f.lastModified);
         // EXIF is awaited up-front here: capture dates are needed to sort the sequence
         const meta = await extractExifMeta(buf);
         if (meta) {
-          img.cameraInfo = meta.cameraInfo;
-          img.captureDate = meta.captureDate;
+          for (const img of imgs) {
+            img.cameraInfo = meta.cameraInfo;
+            img.captureDate = meta.captureDate;
+          }
         }
-        images.push(img);
+        images.push(...imgs);
       } catch (err) {
         errors.push(`${f.name}: ${(err as Error).message}`);
       }
@@ -368,15 +371,15 @@ export function ThermalViewer() {
       {!activeImage ? (
         <div onDragOver={e => e.preventDefault()} onDrop={handleDrop} onClick={() => fileInputRef.current?.click()}
           className="relative group cursor-pointer border-2 border-dashed border-thermal-border rounded-2xl p-12 flex flex-col items-center gap-4 hover:border-thermal-accent/40 transition-colors duration-300">
-          <input ref={fileInputRef} type="file" accept=".irg,.jpg,.jpeg,.img" multiple onChange={upload} className="hidden" />
+          <input ref={fileInputRef} type="file" accept=".irg,.jpg,.jpeg,.img,.seq,.fff" multiple onChange={upload} className="hidden" />
           <div className="size-16 rounded-2xl bg-thermal-surface flex items-center justify-center group-hover:bg-thermal-accent/10 transition-colors">
             <svg className="size-7 text-thermal-muted group-hover:text-thermal-accent transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
             </svg>
           </div>
           <p className="font-display text-sm text-thermal-heading">Drop thermal image(s) here</p>
-          <p className="text-xs text-thermal-muted mt-1">IRG, Hikmicro, DJI, FLIR R-JPEG, FLIR .img — drag or click to browse</p>
-          <p className="text-xs text-thermal-muted">Drop several images taken over time to analyze a temperature sequence</p>
+          <p className="text-xs text-thermal-muted mt-1">IRG, Hikmicro, DJI, FLIR R-JPEG, FLIR .img / .seq video — drag or click to browse</p>
+          <p className="text-xs text-thermal-muted">Drop several images taken over time — or one .seq recording — to analyze a temperature sequence</p>
         </div>
       ) : (
         <>
