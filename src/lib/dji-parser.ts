@@ -3,10 +3,6 @@ import type { ThermalImage } from '@/lib/types';
 /**
  * Parse a DJI radiometric JPEG (DTAT3.0 format) into ThermalImage.
  *
- * Supports:
- *   - DJI Mavic 2 Enterprise Advanced (M2EA)
- *   - DJI M30T, M3T, M3TD, H20N, H30T, M4T
- *
  * File structure:
  *   - SOI + APP1 (EXIF with camera metadata)
  *   - APP2 (MPF — Multi-Picture Format)
@@ -15,11 +11,43 @@ import type { ThermalImage } from '@/lib/types';
  *   - JPEG image data (visible/colorized)
  *   - Second JPEG (visible light image)
  *
- * Conversion uses simplified Planck-based formula:
- *   Temperature = B / ln(R1 / (R2 * (raw - O)) + F) - 273.15
+ * Temperatures come from `raw / 64 = Kelvin`, which holds for the Mavic 2
+ * Enterprise Advanced generation. Newer cameras (M3T, M30T, M4T, H20T/H30T)
+ * store the same raw layout but map it through a per-image calibration curve
+ * that only DJI's Thermal SDK implements; applying the M2EA formula to them
+ * silently returns wrong readings, so they are rejected instead.
+ * Measured against the DJI SDK on real M4T files: up to 5.6 °C of error on
+ * high-gain captures, and ~208 °C on low-gain ones.
  */
+
+/** Cameras whose raw values are Kelvin/64 — the formula below is valid here. */
+const KELVIN64_MODELS = [
+  'MAVIC2-ENTERPRISE-ADVANCED',
+  'M2EA',
+  'XT2',
+  'XTR',
+  'XTS',
+];
+
+/** Cameras that need DJI's proprietary radiometric curve. */
+const SDK_ONLY_MODELS = [
+  'M4T', 'M3T', 'M3TD', 'M30T', 'H20T', 'H20N', 'H30T', 'ZH20T', 'M4TD',
+];
+
 export function parseDJI(buffer: ArrayBuffer): ThermalImage {
   const bytes = new Uint8Array(buffer);
+
+  const model = readExifModel(bytes);
+  if (model) {
+    const norm = model.toUpperCase().replace(/^DJI[\s_-]*/, '').trim();
+    if (!KELVIN64_MODELS.includes(norm) && SDK_ONLY_MODELS.includes(norm)) {
+      throw new Error(
+        `DJI ${model} stores temperatures in a calibration curve that only DJI's ` +
+        `Thermal SDK can decode. Reading it with the Mavic 2 formula would be off ` +
+        `by several degrees, so the file is rejected rather than shown with wrong values.`,
+      );
+    }
+  }
 
   // ── Extract APP3 chunks for raw thermal data ───────────────────────────
   const app3Chunks: Uint8Array[] = [];
@@ -126,10 +154,6 @@ export function parseDJI(buffer: ArrayBuffer): ThermalImage {
   }
 
   // ── Convert raw sensor values to Celsius ────────────────────────────
-  // DJI M2EA raw values: the SDK converts to temperature internally.
-  // Without the SDK, we approximate using raw/64 = Kelvin (common IR convention).
-  // This gives approximate temperatures; the DJI Thermal SDK applies
-  // additional calibration curves for precise radiometry.
   const K_OFFSET = 273.15;
   const celsius = new Float32Array(pixelCount);
   let dataMin = Infinity;
@@ -142,6 +166,16 @@ export function parseDJI(buffer: ArrayBuffer): ThermalImage {
     celsius[pi] = c;
     if (c < dataMin) { dataMin = c; minIdx = pi; }
     if (c > dataMax) { dataMax = c; maxIdx = pi; }
+  }
+
+  // Catches unlisted camera generations: a scene no thermal camera could see
+  // means the Kelvin/64 assumption does not hold for this file.
+  if (dataMax < -80 || dataMin > 600) {
+    throw new Error(
+      `DJI raw values decode to ${dataMin.toFixed(0)}..${dataMax.toFixed(0)} °C, which is ` +
+      `physically impossible — this camera${model ? ` (${model})` : ''} does not use the ` +
+      `Kelvin/64 encoding and needs DJI's Thermal SDK to be read correctly.`,
+    );
   }
 
   // ── Build CDF ──────────────────────────────────────────────────────
@@ -216,6 +250,41 @@ export function parseDJI(buffer: ArrayBuffer): ThermalImage {
     planckO: 0,
     planckR2: 0,
   };
+}
+
+/** Read EXIF IFD0 Model (tag 0x0110) — identifies the DJI camera generation. */
+function readExifModel(bytes: Uint8Array): string | null {
+  for (let i = 0; i < bytes.length - 10; i++) {
+    if (bytes[i] !== 0xFF || bytes[i + 1] !== 0xE1) continue;
+    if (String.fromCharCode(...bytes.slice(i + 4, i + 8)) !== 'Exif') continue;
+
+    const tiff = i + 10;
+    if (tiff + 8 > bytes.length) return null;
+    const view = new DataView(bytes.buffer, bytes.byteOffset + tiff, bytes.byteLength - tiff);
+    const le = view.getUint8(0) === 0x49;
+    const ifdOff = view.getUint32(4, le);
+    if (ifdOff + 2 > view.byteLength) return null;
+
+    const n = view.getUint16(ifdOff, le);
+    for (let e = 0; e < n && e < 100; e++) {
+      const entry = ifdOff + 2 + e * 12;
+      if (entry + 12 > view.byteLength) break;
+      if (view.getUint16(entry, le) !== 0x0110) continue;
+
+      const count = view.getUint32(entry + 4, le);
+      const at = count <= 4 ? entry + 8 : view.getUint32(entry + 8, le);
+      if (at + count > view.byteLength) return null;
+      let s = '';
+      for (let c = 0; c < count; c++) {
+        const ch = view.getUint8(at + c);
+        if (ch === 0) break;
+        s += String.fromCharCode(ch);
+      }
+      return s.trim() || null;
+    }
+    return null;
+  }
+  return null;
 }
 
 /** Build a cumulative-distribution LUT from a Celsius grid (1024 bins). */

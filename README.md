@@ -161,6 +161,16 @@ DJI drone thermal cameras embed raw sensor data in JPEG APP markers.
 |---|---|---|---|
 | Mavic 2 Enterprise Advanced | 640×512 | APP3 segments (concatenated) | uint16 LE, raw/64 = K |
 
+**Newer DJI cameras are rejected, not approximated.** The M3T, M30T, M4T,
+H20T/H20N/H30T store the same APP3 raw layout but map it through a per-image
+calibration curve that only DJI's Thermal SDK implements. Measured against that
+SDK on real M4T captures, reusing the Mavic 2 formula is off by up to 5.6 °C on
+high-gain images and about 208 °C on low-gain ones, so those files raise an
+error explaining why instead of displaying plausible-looking wrong numbers.
+A camera not on either list is still decoded, but a physically impossible
+result (below −80 °C or above 600 °C) is treated as proof the encoding differs
+and reported the same way.
+
 **File structure:** APP1 (EXIF) → APP3 × N (raw thermal, uint16 LE) → APP4 (calibration params as float32) → JPEG image data.
 | `0x22` | 2 bytes | Reference temperature (°C × 1000) |
 | `0x24` | 2 bytes | Distance (m × 1000) |
