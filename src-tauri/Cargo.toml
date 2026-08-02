@@ -1,6 +1,6 @@
 [package]
 name = "thermview"
-version = "0.1.0"
+version = "0.3.0"
 description = "Radiometric thermal image analyzer"
 authors = ["Quentin PEPE"]
 license = ""
