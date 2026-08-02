@@ -2,3 +2,10 @@
 # will have compiled files and executables
 /target/
 /gen/schemas
+
+# DJI Thermal SDK binaries. Deliberately NOT committed: DJI's developer policy
+# permits shipping their object code inside an application, but forbids
+# integrating it "such that any part becomes subject to an open source
+# license" — and this repo is MIT. Download the SDK from DJI and drop the
+# release_x64 contents here to build with `--features dji-sdk`. See DESKTOP.md.
+/vendor/

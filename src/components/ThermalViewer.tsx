@@ -6,6 +6,7 @@ import { CURSOR_COLORS, PALETTES, OVERSCAN_OPTIONS } from '@/lib/constants';
 import { toUnit } from '@/lib/units';
 import type { MeasurementCursor, OverlayConfig, FileInfo, TempUnit, Overscan, ScaleMode, Palette, ThermalImage } from '@/lib/types';
 import { extractExifMeta } from '@/lib/types';
+import { measureDjiWithSdk } from '@/lib/dji-sdk';
 import { buildSequence, meanTemp } from '@/lib/sequence';
 import type { SequenceFrame } from '@/lib/sequence';
 import { ThermalCanvas } from '@/components/ThermalCanvas';
@@ -203,22 +204,28 @@ export function ThermalViewer() {
     const errors: string[] = [];
     const images: ThermalImage[] = [];
     await Promise.all(files.map(async f => {
+      const buf = await f.arrayBuffer();
+      let imgs: ThermalImage[];
       try {
-        const buf = await f.arrayBuffer();
         // A file may hold several frames (.seq thermal video) — flatten them all
-        const imgs = parseThermalImages(buf, f.name, f.lastModified);
-        // EXIF is awaited up-front here: capture dates are needed to sort the sequence
-        const meta = await extractExifMeta(buf);
-        if (meta) {
-          for (const img of imgs) {
-            img.cameraInfo = meta.cameraInfo;
-            img.captureDate = meta.captureDate;
-          }
-        }
-        images.push(...imgs);
+        imgs = parseThermalImages(buf, f.name, f.lastModified);
       } catch (err) {
-        errors.push(`${f.name}: ${(err as Error).message}`);
+        // Newer DJI cameras are rejected by the JS parser on purpose. In the
+        // desktop build, DJI's own SDK can still measure them exactly.
+        const viaSdk = await measureDjiWithSdk(buf, f.name, f.lastModified)
+          .catch(() => null);
+        if (!viaSdk) { errors.push(`${f.name}: ${(err as Error).message}`); return; }
+        imgs = [viaSdk];
       }
+      // EXIF is awaited up-front here: capture dates are needed to sort the sequence
+      const meta = await extractExifMeta(buf);
+      if (meta) {
+        for (const img of imgs) {
+          img.cameraInfo = meta.cameraInfo;
+          img.captureDate = meta.captureDate;
+        }
+      }
+      images.push(...imgs);
     }));
     if (errors.length) alert(`Failed to parse ${errors.length} file(s):\n${errors.join('\n')}`);
     if (!images.length) return;
