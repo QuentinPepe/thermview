@@ -19,7 +19,7 @@ interface DjiThermal {
   reflection: number;
 }
 
-type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+type Invoke = <T>(cmd: string, args?: unknown) => Promise<T>;
 
 function invoker(): Invoke | null {
   const w = window as unknown as {
@@ -40,7 +40,13 @@ export function djiSdkAvailable(): Promise<boolean> {
   return availability;
 }
 
-/** Measure a DJI R-JPEG via the SDK. Returns null when unavailable. */
+/**
+ * Measure a DJI R-JPEG via the SDK.
+ *
+ * Returns null only when there is no SDK to ask — a build without the feature,
+ * or the browser. A failure *inside* the SDK throws, so the caller can report
+ * what actually went wrong instead of a generic "unsupported camera".
+ */
 export async function measureDjiWithSdk(
   buffer: ArrayBuffer,
   fileName: string,
@@ -49,9 +55,8 @@ export async function measureDjiWithSdk(
   const invoke = invoker();
   if (!invoke || !(await djiSdkAvailable())) return null;
 
-  const r = await invoke<DjiThermal>('dji_measure', {
-    rjpeg: Array.from(new Uint8Array(buffer)),
-  });
+  // Sent as a raw body: a JSON array of a million numbers took seconds.
+  const r = await invoke<DjiThermal>('dji_measure', new Uint8Array(buffer));
 
   const celsius = Float32Array.from(r.celsius);
   let dataMin = Infinity, dataMax = -Infinity, minIdx = 0, maxIdx = 0;

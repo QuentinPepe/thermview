@@ -213,8 +213,15 @@ export function ThermalViewer() {
       } catch (err) {
         // Newer DJI cameras are rejected by the JS parser on purpose. In the
         // desktop build, DJI's own SDK can still measure them exactly.
-        const viaSdk = await measureDjiWithSdk(buf, f.name, f.lastModified)
-          .catch(() => null);
+        let viaSdk: ThermalImage | null;
+        try {
+          viaSdk = await measureDjiWithSdk(buf, f.name, f.lastModified);
+        } catch (sdkErr) {
+          // The SDK was there and refused the file: say why, since that is the
+          // real reason, not the parser's "unsupported camera" message.
+          errors.push(`${f.name}: DJI SDK could not read this file — ${sdkErr}`);
+          return;
+        }
         if (!viaSdk) { errors.push(`${f.name}: ${(err as Error).message}`); return; }
         imgs = [viaSdk];
       }

@@ -36,13 +36,24 @@ pub fn dji_sdk_available() -> bool {
 }
 
 /// Measure every pixel of a DJI radiometric JPEG, in Celsius.
+///
+/// The image arrives as a raw request body rather than a JSON array: a 1.4 MB
+/// file encoded as 1.4 million JSON numbers took ~3.8 s per image, which a
+/// ten-image sequence cannot afford.
 #[tauri::command]
-pub fn dji_measure(rjpeg: Vec<u8>) -> Result<DjiThermal, String> {
+pub fn dji_measure(request: tauri::ipc::Request<'_>) -> Result<DjiThermal, String> {
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("expected the image as a raw body, got JSON".into())
+        }
+    };
+
     #[cfg(feature = "dji-sdk")]
-    { sdk::measure(rjpeg) }
+    { sdk::measure(bytes) }
     #[cfg(not(feature = "dji-sdk"))]
     {
-        let _ = rjpeg;
+        let _ = bytes;
         Err("This build has no DJI Thermal SDK support (rebuild with --features dji-sdk)".into())
     }
 }
