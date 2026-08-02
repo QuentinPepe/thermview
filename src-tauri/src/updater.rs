@@ -269,6 +269,35 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Exercises the real download path against the published release, then
+    /// installs it over a stand-in file. Opt-in: needs the network.
+    #[test]
+    fn downloads_and_installs_the_published_release() {
+        if std::env::var("THERMVIEW_LIVE_UPDATE_TEST").is_err() {
+            eprintln!("skipped: set THERMVIEW_LIVE_UPDATE_TEST=1 to run");
+            return;
+        }
+        let Some(info) = update_check().expect("update check failed") else {
+            eprintln!("skipped: already on the latest release, nothing to download");
+            return;
+        };
+
+        let bytes = download(&info.url, info.size).expect("download failed");
+        assert_eq!(bytes.len() as u64, info.size);
+        assert_eq!(&bytes[..2], b"MZ");
+
+        let dir = temp_dir("live");
+        let exe = dir.join("app.exe");
+        fs::write(&exe, b"MZ pretend this is the old build").unwrap();
+        install_over(&exe, &bytes).expect("install failed");
+
+        assert_eq!(fs::metadata(&exe).unwrap().len(), info.size);
+        assert!(stale_path(&exe).exists(), "previous build must be kept");
+        println!("installed {} ({} bytes) over the stand-in", info.version, info.size);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn clean_previous_removes_only_the_backup() {
         let dir = temp_dir("clean");
