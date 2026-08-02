@@ -12,6 +12,7 @@ import type { SequenceFrame } from '@/lib/sequence';
 import { ThermalCanvas } from '@/components/ThermalCanvas';
 import { RangeColorBar } from '@/components/RangeColorBar';
 import { CursorPanel } from '@/components/CursorPanel';
+import { UpdateBanner } from '@/components/UpdateBanner';
 import { SequencePanel } from '@/components/SequencePanel';
 import { SequenceChart } from '@/components/SequenceChart';
 import { SequenceStats } from '@/components/SequenceStats';
@@ -374,6 +375,8 @@ export function ThermalViewer() {
           <span className="font-display text-[0.65rem] text-thermal-muted tracking-[0.2em]">MULTI-FORMAT THERMAL ANALYZER</span>
         </div>
       </header>
+
+      <UpdateBanner />
 
       {!activeImage ? (
         <div onDragOver={e => e.preventDefault()} onDrop={handleDrop} onClick={() => fileInputRef.current?.click()}

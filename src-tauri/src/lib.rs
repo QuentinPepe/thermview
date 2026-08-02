@@ -1,4 +1,5 @@
 pub mod dji;
+pub mod updater;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -9,8 +10,12 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       dji::dji_measure,
       dji::dji_sdk_available,
+      updater::update_check,
+      updater::update_apply,
     ])
     .setup(|app| {
+      // Drop the executable the last update replaced.
+      updater::clean_previous();
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()

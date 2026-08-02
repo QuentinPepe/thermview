@@ -47,6 +47,46 @@ Microsoft's free "Evergreen Standalone Installer" from
 If you need a build with *zero* dependency, Electron bundles its own engine
 instead, at the cost of a ~185 MB executable rather than ~12 MB.
 
+## Self-update
+
+The app checks this project's GitHub releases on launch. When a newer tag is
+published it shows a banner; one click downloads the new executable, replaces
+itself and restarts. Someone using the app is only ever sent one file — every
+later version arrives on its own.
+
+Publishing a new version is just the existing tag flow:
+
+```bash
+git tag v0.3.0 && git push origin v0.3.0
+```
+
+Tauri's own updater is not used here: it installs an NSIS/MSI package, which
+would give up the portable single-file build. Instead `src-tauri/src/updater.rs`
+swaps the executable directly, which Windows permits because a running exe can
+be renamed even though it cannot be overwritten. The live copy is moved to
+`<name>.exe.old`, the download takes its place, and the leftover is deleted on
+the next launch — so a failed install still leaves a working app on disk.
+
+Guards, since this downloads and then runs code:
+
+- only `https://` URLs on GitHub's own hosts are fetched, checked by exact host
+  match so a lookalike domain cannot pass
+- the download must match the size the release feed declared and start with a
+  `MZ` header, or it is discarded
+- the release tag must parse as a higher version number; anything unparseable
+  is treated as "no update"
+- a failed network call is swallowed, never blocking the app from starting
+
+`cargo test` covers the version comparison, the host allow-list and the file
+swap. The check against the real feed is opt-in:
+
+```bash
+cd src-tauri
+THERMVIEW_LIVE_UPDATE_TEST=1 cargo test --test updater_live -- --nocapture
+```
+
+The repository it looks at is the `REPO` constant in `updater.rs`.
+
 ## DJI camera support (optional)
 
 Newer DJI cameras — M3T, M30T, M4T, H20T/H20N/H30T — map their raw sensor

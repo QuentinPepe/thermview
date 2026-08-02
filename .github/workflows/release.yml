@@ -41,18 +41,31 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
-      # Keep the built artifact's version in step with the tag instead of
-      # letting tauri.conf.json drift out of date.
+      # Keep the built artifact's version in step with the tag. Cargo.toml
+      # matters as much as tauri.conf.json: the self-updater compares the tag
+      # against CARGO_PKG_VERSION, so leaving it behind would make every build
+      # believe it is out of date.
       - name: Sync version from tag
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}".TrimStart('v')
+
           $path = 'src-tauri/tauri.conf.json'
           $conf = Get-Content $path -Raw | ConvertFrom-Json
           $conf.version = $version
           $conf | ConvertTo-Json -Depth 20 | Set-Content $path -Encoding utf8
-          Write-Host "tauri.conf.json version set to $version"
+
+          # Only the [package] version, which is the first one in the file.
+          $cargo = 'src-tauri/Cargo.toml'
+          $lines = Get-Content $cargo
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^version\s*=') { $lines[$i] = "version = `"$version`""; break }
+          }
+          Set-Content $cargo $lines -Encoding utf8
+
+          Write-Host "version set to $version in tauri.conf.json and Cargo.toml"
+          Select-String -Path $cargo -Pattern '^version' | Select-Object -First 1
 
       - name: Build portable executable
         run: npm run desktop
