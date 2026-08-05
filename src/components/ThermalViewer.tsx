@@ -219,7 +219,7 @@ export function ThermalViewer() {
         } catch (sdkErr) {
           // The SDK was there and refused the file: say why, since that is the
           // real reason, not the parser's "unsupported camera" message.
-          errors.push(`${f.name}: DJI SDK could not read this file — ${sdkErr}`);
+          errors.push(`${f.name}: ${String(sdkErr).replace(/^Error:\s*/, '')}`);
           return;
         }
         if (!viaSdk) { errors.push(`${f.name}: ${(err as Error).message}`); return; }

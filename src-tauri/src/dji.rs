@@ -141,6 +141,26 @@ mod sdk {
         .map_err(|e| e.clone())
     }
 
+    /// Turn a dirp return code into something the person holding the drone can
+    /// act on. -12 is the one that matters in practice: DJI's own library logs
+    /// "high high gain not supported this function" and refuses to measure
+    /// photos shot in that gain mode, so no amount of work on our side helps.
+    fn explain_measure_failure(code: i32) -> String {
+        match code {
+            -12 => "this photo was shot in a thermal gain mode DJI's own SDK cannot \
+                    measure, so no temperatures can be read from it. Reshoot with the \
+                    camera's standard high-gain or low-gain temperature mode — often \
+                    the culprit is a mapping/surveying mission, which switches the \
+                    thermal camera into that mode."
+                .to_string(),
+            -4 => "the thermal data inside this file is not readable (dirp code -4)".to_string(),
+            -5 => "this file's thermal header is not one the SDK recognises (dirp code -5)"
+                .to_string(),
+            -6 => "this file carries no usable calibration curve (dirp code -6)".to_string(),
+            other => format!("SDK measurement failed (dirp code {other})"),
+        }
+    }
+
     pub fn measure(rjpeg: Vec<u8>) -> Result<DjiThermal, String> {
         let lib = library()?;
         unsafe {
@@ -175,7 +195,7 @@ mod sdk {
                 let bytes = (count * std::mem::size_of::<f32>()) as i32;
                 let ret = measure(handle, celsius.as_mut_ptr(), bytes);
                 if ret != 0 {
-                    return Err(format!("SDK measurement failed (dirp code {ret})"));
+                    return Err(explain_measure_failure(ret));
                 }
                 Ok(DjiThermal {
                     width: res.width as u32,
