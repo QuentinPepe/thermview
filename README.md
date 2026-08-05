@@ -161,15 +161,30 @@ DJI drone thermal cameras embed raw sensor data in JPEG APP markers.
 |---|---|---|---|
 | Mavic 2 Enterprise Advanced | 640×512 | APP3 segments (concatenated) | uint16 LE, raw/64 = K |
 
-**Newer DJI cameras are rejected, not approximated.** The M3T, M30T, M4T,
+**Newer DJI cameras are never approximated.** The M3T, M30T, M4T,
 H20T/H20N/H30T store the same APP3 raw layout but map it through a per-image
 calibration curve that only DJI's Thermal SDK implements. Measured against that
 SDK on real M4T captures, reusing the Mavic 2 formula is off by up to 5.6 °C on
-high-gain images and about 208 °C on low-gain ones, so those files raise an
-error explaining why instead of displaying plausible-looking wrong numbers.
-A camera not on either list is still decoded, but a physically impossible
-result (below −80 °C or above 600 °C) is treated as proof the encoding differs
-and reported the same way.
+high-gain images and about 208 °C on low-gain ones. A camera on neither list
+whose pixels decode to a physically impossible range (below −80 °C or above
+600 °C) is treated the same way. Those files take one of two paths:
+
+- **Desktop build with the DJI SDK** — measured exactly, matching DJI's own
+  output. See [`DESKTOP.md`](DESKTOP.md).
+- **Otherwise** — loaded on a *sensor-unit* scale, clearly labelled, never
+  dressed up as degrees. Relative heat, hot spots and evolution across a series
+  stay accurate, and a **two-point calibration** turns the whole series into
+  degrees: click two spots whose real temperature you know and enter them.
+
+The two-point fit is honest about its limits. DJI's raw-to-temperature curve is
+near-linear over one scene — fitting one against the SDK left a residual under
+0.3 °C — so two references pin the scale, but accuracy is only ever as good as
+those references, and the fit belongs to that capture.
+
+Some captures cannot be measured by anything: DJI's own library answers
+`high high gain not supported this function` and refuses, for photos shot in
+that gain mode (often a mapping/surveying mission). The app says so, and those
+files still load on the sensor-unit scale.
 
 **File structure:** APP1 (EXIF) → APP3 × N (raw thermal, uint16 LE) → APP4 (calibration params as float32) → JPEG image data.
 | `0x22` | 2 bytes | Reference temperature (°C × 1000) |

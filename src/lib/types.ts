@@ -88,6 +88,22 @@ export interface ThermalImage {
    *  When true, editing emissivity/distance/etc. can recompute temperatures.
    *  When false, calibration is baked into the stored temperatures and params are read-only. */
   isRecomputable: boolean;
+
+  /**
+   * False when `celsius` actually holds raw sensor units rather than degrees.
+   *
+   * Some DJI captures carry their thermal payload but no conversion anyone can
+   * apply — DJI's SDK refuses the gain mode and publishes no formula. Rather
+   * than discard the image, it is shown on a sensor-unit scale: relative heat,
+   * hot spots and evolution over a series all remain readable, and a two-point
+   * calibration can turn it into degrees.
+   *
+   * Absent means calibrated, so existing parsers need no change.
+   */
+  calibrated?: boolean;
+
+  /** Linear fit applied to sensor units: celsius = raw * scale + offset. */
+  calibration?: { scale: number; offset: number };
   /** Raw sensor AD counts (only present when isRecomputable). Same dimensions as celsius. */
   rawValues: Uint16Array | null;
   /** Planck calibration constants for recomputation (only when isRecomputable) */

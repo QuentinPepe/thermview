@@ -7,12 +7,15 @@ import { toUnit } from '@/lib/units';
 import type { MeasurementCursor, OverlayConfig, FileInfo, TempUnit, Overscan, ScaleMode, Palette, ThermalImage } from '@/lib/types';
 import { extractExifMeta } from '@/lib/types';
 import { measureDjiWithSdk } from '@/lib/dji-sdk';
+import { applyCalibration } from '@/lib/two-point';
+import type { Calibration } from '@/lib/two-point';
 import { buildSequence, meanTemp } from '@/lib/sequence';
 import type { SequenceFrame } from '@/lib/sequence';
 import { ThermalCanvas } from '@/components/ThermalCanvas';
 import { RangeColorBar } from '@/components/RangeColorBar';
 import { CursorPanel } from '@/components/CursorPanel';
 import { UpdateBanner } from '@/components/UpdateBanner';
+import { TwoPointPanel } from '@/components/TwoPointPanel';
 import { SequencePanel } from '@/components/SequencePanel';
 import { SequenceChart } from '@/components/SequenceChart';
 import { SequenceStats } from '@/components/SequenceStats';
@@ -108,6 +111,10 @@ export function ThermalViewer() {
   const [hoverTemp, setHoverTemp] = useState<number | null>(null);
   const [cursors, setCursors] = useState<MeasurementCursor[]>([]);
   const [overlay, setOverlay] = useState<OverlayConfig>({ showMinMaxSpots: true, showEmissivity: true, showTimestamp: true });
+  /** Two-point fit applied to a series that arrived in sensor units. */
+  const [calibration, setCalibration] = useState<Calibration | null>(null);
+  /** Why the DJI SDK could not put degrees on these images. */
+  const [sdkNote, setSdkNote] = useState<string | null>(null);
 
   // Editable calibration params (initialised from file defaults)
   const [editEmissivity, setEditEmissivity] = useState(0.95);
@@ -133,7 +140,7 @@ export function ThermalViewer() {
 
   // Apply calibration edits to every frame; skipped when params match the file
   // defaults or the format is not recomputable, so this is free in the common case
-  const frames = useMemo(() => rawFrames.map(f => {
+  const recomputed = useMemo(() => rawFrames.map(f => {
     const img = f.image;
     const unchanged =
       Math.abs(editEmissivity - img.emissivity) < 1e-6 &&
@@ -152,6 +159,16 @@ export function ThermalViewer() {
     return { ...f, image: re, mean: meanTemp(re) };
   }), [rawFrames, editEmissivity, editDistance, editRefTemp, editAirTemp, editHumidity]);
 
+  // A two-point fit belongs to the capture, so it covers the whole series.
+  const frames = useMemo(() => {
+    if (!calibration) return recomputed;
+    return recomputed.map(f => {
+      if (f.image.calibrated !== false) return f;
+      const cal = applyCalibration(f.image, calibration);
+      return { ...f, image: cal, mean: meanTemp(cal) };
+    });
+  }, [recomputed, calibration]);
+
   const isSequence = frames.length > 1;
   const activeFrame = frames[currentIdx] ?? null;
   const activeImage = activeFrame?.image ?? null;
@@ -165,6 +182,14 @@ export function ThermalViewer() {
     }
     return Number.isFinite(lo) ? { min: lo, max: hi } : null;
   }, [frames]);
+
+  // Sensor units must never be dressed up as degrees.
+  const uncalibrated = activeImage?.calibrated === false;
+  const unitLabel = uncalibrated ? '' : `°${tempUnit}`;
+  const fmtVal = useCallback(
+    (v: number) => (uncalibrated ? Math.round(v).toString() : toUnit(v, tempUnit)),
+    [uncalibrated, tempUnit],
+  );
 
   const lockScale = globalScale && isSequence && globalRange !== null;
   const barMin = lockScale ? globalRange!.min : activeImage?.dataMin ?? 0;
@@ -203,6 +228,7 @@ export function ThermalViewer() {
   const processFiles = useCallback(async (files: File[]) => {
     if (!files.length) return;
     const errors: string[] = [];
+    const sdkNotes: string[] = [];
     const images: ThermalImage[] = [];
     await Promise.all(files.map(async f => {
       const buf = await f.arrayBuffer();
@@ -211,19 +237,20 @@ export function ThermalViewer() {
         // A file may hold several frames (.seq thermal video) — flatten them all
         imgs = parseThermalImages(buf, f.name, f.lastModified);
       } catch (err) {
-        // Newer DJI cameras are rejected by the JS parser on purpose. In the
-        // desktop build, DJI's own SDK can still measure them exactly.
-        let viaSdk: ThermalImage | null;
+        errors.push(`${f.name}: ${(err as Error).message}`);
+        return;
+      }
+
+      // A DJI capture the JS side cannot convert arrives in sensor units. The
+      // desktop build can often turn it into real degrees via DJI's own SDK;
+      // when it cannot, the image still loads uncalibrated and stays useful.
+      if (imgs.length === 1 && imgs[0].calibrated === false) {
         try {
-          viaSdk = await measureDjiWithSdk(buf, f.name, f.lastModified);
+          const viaSdk = await measureDjiWithSdk(buf, f.name, f.lastModified);
+          if (viaSdk) imgs = [viaSdk];
         } catch (sdkErr) {
-          // The SDK was there and refused the file: say why, since that is the
-          // real reason, not the parser's "unsupported camera" message.
-          errors.push(`${f.name}: ${String(sdkErr).replace(/^Error:\s*/, '')}`);
-          return;
+          sdkNotes.push(`${f.name}: ${String(sdkErr).replace(/^Error:\s*/, '')}`);
         }
-        if (!viaSdk) { errors.push(`${f.name}: ${(err as Error).message}`); return; }
-        imgs = [viaSdk];
       }
       // EXIF is awaited up-front here: capture dates are needed to sort the sequence
       const meta = await extractExifMeta(buf);
@@ -244,6 +271,9 @@ export function ThermalViewer() {
     setPlaying(false);
     setCursors([]);
     setGlobalScale(true);
+    setCalibration(null);
+    // Not an error: the images loaded, they just carry no degree scale.
+    setSdkNote(sdkNotes[0] ?? null);
 
     // Lock the range to the global series min/max so colors are comparable
     let lo = Infinity, hi = -Infinity;
@@ -314,6 +344,22 @@ export function ThermalViewer() {
       return next;
     });
   }, [globalRange, activeImage]);
+
+  /**
+   * Switch the series between sensor units and degrees.
+   *
+   * The colour window is expressed in whatever unit the pixels use, so it has
+   * to travel through the same fit — otherwise the view keeps a raw-unit
+   * window over Celsius data and every pixel lands out of range.
+   */
+  const applyTwoPoint = useCallback((cal: Calibration | null) => {
+    const toRaw = (v: number) =>
+      calibration ? (v - calibration.offset) / calibration.scale : v;
+    const toNew = (raw: number) => (cal ? raw * cal.scale + cal.offset : raw);
+    setRangeMin(toNew(toRaw(rangeMin)));
+    setRangeMax(toNew(toRaw(rangeMax)));
+    setCalibration(cal);
+  }, [calibration, rangeMin, rangeMax]);
 
   const addCursor = useCallback((x: number, y: number, tempC: number) => {
     const id = ++cursorIdRef.current;
@@ -514,18 +560,44 @@ export function ThermalViewer() {
               </div>
               <div className="w-px h-5 bg-thermal-border" />
               <span className="font-display text-[0.65rem] text-thermal-muted">
-                Window: <span className="text-thermal-cold">{toUnit(rangeMin, tempUnit)}</span>
+                Window: <span className="text-thermal-cold">{fmtVal(rangeMin)}</span>
                 <span className="mx-1">–</span>
-                <span className="text-thermal-hot">{toUnit(rangeMax, tempUnit)}</span>
-                <span className="ml-1">°{tempUnit}</span>
+                <span className="text-thermal-hot">{fmtVal(rangeMax)}</span>
+                <span className="ml-1">{uncalibrated ? 'raw' : unitLabel}</span>
               </span>
               <span className="ml-auto text-[0.6rem] text-thermal-muted font-display">
-                Image: {toUnit(activeImage.dataMin, tempUnit)}–{toUnit(activeImage.dataMax, tempUnit)}°{tempUnit}
+                Image: {fmtVal(activeImage.dataMin)}–{fmtVal(activeImage.dataMax)}{unitLabel}
                 {lockScale && (
-                  <span className="ml-2">Series: {toUnit(globalRange!.min, tempUnit)}–{toUnit(globalRange!.max, tempUnit)}°{tempUnit}</span>
+                  <span className="ml-2">Series: {fmtVal(globalRange!.min)}–{fmtVal(globalRange!.max)}{unitLabel}</span>
                 )}
               </span>
             </div>
+
+            {uncalibrated && (
+              <>
+                {sdkNote && (
+                  <p className="font-display text-[0.6rem] text-thermal-muted px-1">{sdkNote}</p>
+                )}
+                <TwoPointPanel cursors={displayCursors} onApply={applyTwoPoint} />
+              </>
+            )}
+
+            {calibration && activeImage?.calibration && (
+              <div className="flex flex-wrap items-center gap-3 rounded-lg bg-thermal-surface/80 px-4 py-2">
+                <div className="size-1.5 rounded-full bg-thermal-accent" />
+                <span className="font-display text-[0.6rem] text-thermal-heading tracking-[0.14em] uppercase">
+                  Two-point calibration active
+                </span>
+                <span className="font-display text-[0.6rem] text-thermal-muted tabular-nums">
+                  {activeImage.calibration.scale.toFixed(5)} °C per sensor unit — accuracy follows your two references
+                </span>
+                <div className="flex-1" />
+                <button onClick={() => applyTwoPoint(null)}
+                  className="px-2.5 py-1.5 rounded-md font-display text-[0.7rem] font-semibold text-thermal-muted hover:text-thermal-text hover:bg-white/5">
+                  Remove
+                </button>
+              </div>
+            )}
 
             {isSequence && (
               <SequencePanel
@@ -561,7 +633,7 @@ export function ThermalViewer() {
               />
               {hoverTemp !== null && (
                 <div className="absolute top-2 right-2 pointer-events-none bg-black/80 backdrop-blur-sm border border-white/10 rounded px-2 py-1 font-display text-xs text-white z-20">
-                  {toUnit(hoverTemp, tempUnit)}°{tempUnit}
+                  {fmtVal(hoverTemp)}{uncalibrated ? ' raw' : unitLabel}
                 </div>
               )}
             </div>

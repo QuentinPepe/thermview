@@ -38,16 +38,11 @@ export function parseDJI(buffer: ArrayBuffer): ThermalImage {
   const bytes = new Uint8Array(buffer);
 
   const model = readExifModel(bytes);
-  if (model) {
-    const norm = model.toUpperCase().replace(/^DJI[\s_-]*/, '').trim();
-    if (!KELVIN64_MODELS.includes(norm) && SDK_ONLY_MODELS.includes(norm)) {
-      throw new Error(
-        `DJI ${model} stores temperatures in a calibration curve that only DJI's ` +
-        `Thermal SDK can decode. Reading it with the Mavic 2 formula would be off ` +
-        `by several degrees, so the file is rejected rather than shown with wrong values.`,
-      );
-    }
-  }
+  const norm = model ? model.toUpperCase().replace(/^DJI[\s_-]*/, '').trim() : '';
+  // Applying the Kelvin/64 formula to these would be wrong by several degrees,
+  // so their pixels stay in sensor units until something can calibrate them:
+  // DJI's SDK in the desktop build, or a two-point calibration by hand.
+  const sdkOnly = norm !== '' && !KELVIN64_MODELS.includes(norm) && SDK_ONLY_MODELS.includes(norm);
 
   // ── Extract APP3 chunks for raw thermal data ───────────────────────────
   const app3Chunks: Uint8Array[] = [];
@@ -146,11 +141,15 @@ export function parseDJI(buffer: ArrayBuffer): ThermalImage {
     // offset 12: reflected temperature (float32 LE)
     if (calView.byteLength >= 16) refTemp = calView.getFloat32(12, true);
 
-    // Clamp to valid ranges
-    emissivity = Math.max(0.1, Math.min(1.0, emissivity));
-    distance = Math.max(1, Math.min(25, distance));
-    humidity = Math.max(20, Math.min(100, humidity));
-    refTemp = Math.max(-40, Math.min(500, refTemp));
+    // Clamp to valid ranges, and fall back to the defaults rather than let a
+    // meaningless APP4 block surface as 0.10 emissivity or a NaN distance —
+    // captures the SDK reports zeroed parameters for land here.
+    const sane = (v: number, lo: number, hi: number, fallback: number) =>
+      Number.isFinite(v) && v >= lo && v <= hi ? v : fallback;
+    emissivity = sane(emissivity, 0.1, 1.0, 0.95);
+    distance = sane(distance, 0.1, 200, 5.0);
+    humidity = sane(humidity, 1, 100, 70.0);
+    refTemp = sane(refTemp, -40, 200, 23.0);
   }
 
   // ── Convert raw sensor values to Celsius ────────────────────────────
@@ -168,22 +167,27 @@ export function parseDJI(buffer: ArrayBuffer): ThermalImage {
     if (c > dataMax) { dataMax = c; maxIdx = pi; }
   }
 
-  // Catches unlisted camera generations: a scene no thermal camera could see
-  // means the Kelvin/64 assumption does not hold for this file.
-  if (dataMax < -80 || dataMin > 600) {
-    throw new Error(
-      `DJI raw values decode to ${dataMin.toFixed(0)}..${dataMax.toFixed(0)} °C, which is ` +
-      `physically impossible — this camera${model ? ` (${model})` : ''} does not use the ` +
-      `Kelvin/64 encoding and needs DJI's Thermal SDK to be read correctly.`,
-    );
+  // A scene no thermal camera could see means the Kelvin/64 assumption does not
+  // hold — an unlisted camera generation. Treat it like the known ones.
+  const implausible = dataMax < -80 || dataMin > 600;
+
+  if (sdkOnly || implausible) {
+    // Keep the sensor units themselves; degrees would be fiction.
+    dataMin = Infinity; dataMax = -Infinity; minIdx = 0; maxIdx = 0;
+    for (let pi = 0; pi < pixelCount; pi++) {
+      const v = rawValues[pi];
+      celsius[pi] = v;
+      if (v < dataMin) { dataMin = v; minIdx = pi; }
+      if (v > dataMax) { dataMax = v; maxIdx = pi; }
+    }
   }
 
   // ── Build CDF ──────────────────────────────────────────────────────
   const cdfLut = buildCDF(celsius);
 
   // ── Try to extract metadata from EXIF ───────────────────────────────
-  let airTemp = 20;
-  let atmTrans = 1;
+  const airTemp = 20;
+  const atmTrans = 1;
 
   // Parse EXIF APP1 for camera model
   i = 0;
@@ -244,6 +248,7 @@ export function parseDJI(buffer: ArrayBuffer): ThermalImage {
     // DJI stores pre-calibrated temperatures, not raw sensor counts.
     isRecomputable: false,
     rawValues: null,
+    calibrated: !(sdkOnly || implausible),
     planckR1: 0,
     planckB: 0,
     planckF: 0,
