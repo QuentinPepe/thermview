@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { createGradientStrip, scaleTempToT, tToTempC } from '@/lib/irg-parser';
-import { toUnit } from '@/lib/units';
+import { toUnit, tickStep } from '@/lib/units';
 import type { Palette, ScaleMode, TempUnit } from '@/lib/types';
 
 export function RangeColorBar({
@@ -38,7 +38,7 @@ export function RangeColorBar({
 
   const ticks = useMemo(() => {
     const span = rangeMax - rangeMin;
-    const step = span > 20 ? 5 : span > 10 ? 2 : span > 5 ? 1 : span > 2 ? 0.5 : 0.2;
+    const step = tickStep(span, 10);
     const r: { y: number; label: string }[] = [];
     for (let v = Math.ceil(rangeMin / step) * step; v <= rangeMax; v += step) {
       r.push({ y: tempToFrac(v), label: `${Math.round(v)}°` });

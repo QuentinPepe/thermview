@@ -19,6 +19,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # DJI's binaries cannot live in this repository: their developer policy
+      # forbids integrating the SDK such that any part falls under an open
+      # source license, and this repo is MIT. They come from a private repo
+      # instead, via a read-only deploy key. Without the secret — a fork, or
+      # someone else's clone — the build simply goes ahead without DJI support.
+      - name: Fetch DJI Thermal SDK
+        id: dji
+        if: env.DEPLOY_KEY != ''
+        env:
+          DEPLOY_KEY: ${{ secrets.DJI_SDK_DEPLOY_KEY }}
+        uses: actions/checkout@v4
+        with:
+          repository: QuentinPepe/thermview-dji-sdk
+          ssh-key: ${{ secrets.DJI_SDK_DEPLOY_KEY }}
+          path: .dji-sdk
+
+      - name: Stage the SDK where the build expects it
+        id: sdk
+        shell: pwsh
+        run: |
+          $src = '.dji-sdk/release_x64'
+          if (Test-Path $src) {
+            New-Item -ItemType Directory -Force src-tauri/vendor/dji | Out-Null
+            Copy-Item "$src/*" src-tauri/vendor/dji/ -Force
+            $n = (Get-ChildItem src-tauri/vendor/dji -File).Count
+            Write-Host "staged $n SDK files"
+            "features=--features dji-sdk" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "dji=yes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            Write-Host "::warning::DJI SDK unavailable — building without DJI camera support"
+            "features=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "dji=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

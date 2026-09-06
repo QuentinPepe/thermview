@@ -49,6 +49,11 @@ pub fn dji_measure(request: tauri::ipc::Request<'_>) -> Result<DjiThermal, Strin
         }
     };
 
+    measure_bytes(bytes)
+}
+
+/// Same as `dji_measure`, on bytes already in hand (tests, tooling).
+pub fn measure_bytes(bytes: Vec<u8>) -> Result<DjiThermal, String> {
     #[cfg(feature = "dji-sdk")]
     { sdk::measure(bytes) }
     #[cfg(not(feature = "dji-sdk"))]
@@ -65,7 +70,7 @@ mod sdk {
     use std::ffi::c_void;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
 
     type Handle = *mut c_void;
 
@@ -161,8 +166,15 @@ mod sdk {
         }
     }
 
+    /// libdirp is not safe to call from several threads at once: two images
+    /// measured in parallel corrupt the heap (STATUS_HEAP_CORRUPTION), which
+    /// is exactly what dropping a series on the app did, since every file's
+    /// command runs on its own thread. One measurement at a time.
+    static SDK_LOCK: Mutex<()> = Mutex::new(());
+
     pub fn measure(rjpeg: Vec<u8>) -> Result<DjiThermal, String> {
         let lib = library()?;
+        let _one_at_a_time = SDK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             let create: Symbol<unsafe extern "C" fn(*const u8, i32, *mut Handle) -> i32> =
                 lib.get(b"dirp_create_from_rjpeg\0").map_err(|e| e.to_string())?;

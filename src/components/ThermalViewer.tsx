@@ -356,8 +356,10 @@ export function ThermalViewer() {
     const toRaw = (v: number) =>
       calibration ? (v - calibration.offset) / calibration.scale : v;
     const toNew = (raw: number) => (cal ? raw * cal.scale + cal.offset : raw);
-    setRangeMin(toNew(toRaw(rangeMin)));
-    setRangeMax(toNew(toRaw(rangeMax)));
+    // A fit with a negative slope swaps the ends of the window.
+    const lo = toNew(toRaw(rangeMin)), hi = toNew(toRaw(rangeMax));
+    setRangeMin(Math.min(lo, hi));
+    setRangeMax(Math.max(lo, hi));
     setCalibration(cal);
   }, [calibration, rangeMin, rangeMax]);
 

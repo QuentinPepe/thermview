@@ -16,7 +16,7 @@ fn measures_dji_rjpeg_against_reference() {
         return;
     };
 
-    let out = thermview_lib::dji::dji_measure(bytes).expect("SDK measurement failed");
+    let out = thermview_lib::dji::measure_bytes(bytes).expect("SDK measurement failed");
 
     assert_eq!(out.width * out.height, out.celsius.len() as u32);
     assert!(out.width > 0 && out.height > 0);
@@ -41,4 +41,32 @@ fn measures_dji_rjpeg_against_reference() {
             "max {max:.2} C differs from reference {expected:.2} C"
         );
     }
+}
+
+/// A series hands every file to the SDK at once, each on its own command
+/// thread. libdirp corrupts the heap under that, so the bridge serialises the
+/// calls; this drives it from several threads and must simply come back.
+#[cfg(feature = "dji-sdk")]
+#[test]
+fn survives_parallel_measurements() {
+    let Ok(path) = std::env::var("THERMVIEW_DJI_SAMPLE") else {
+        eprintln!("skipped: set THERMVIEW_DJI_SAMPLE to a DJI R-JPEG");
+        return;
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        eprintln!("skipped: cannot read {path}");
+        return;
+    };
+
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let bytes = bytes.clone();
+            std::thread::spawn(move || thermview_lib::dji::measure_bytes(bytes).map(|_| ()))
+        })
+        .collect();
+    let results: Vec<_> = threads.into_iter().map(|t| t.join().expect("thread died")).collect();
+
+    // Every call must reach the same verdict; a refused file is refused eight times.
+    let first = &results[0];
+    assert!(results.iter().all(|r| r == first), "inconsistent results: {results:?}");
 }

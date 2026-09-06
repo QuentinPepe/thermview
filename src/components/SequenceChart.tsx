@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect, useMemo, useCallback } from 'react';
-import { toUnit } from '@/lib/units';
+import { toUnit, tickStep } from '@/lib/units';
 import { formatElapsed } from '@/lib/sequence';
 import type { SequenceFrame } from '@/lib/sequence';
 import type { TempUnit } from '@/lib/types';
@@ -86,7 +86,7 @@ export function SequenceChart({ frames, currentIdx, tempUnit, onSeek }: {
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     const span = yMax - yMin;
-    const step = span > 40 ? 10 : span > 16 ? 5 : span > 8 ? 2 : span > 4 ? 1 : 0.5;
+    const step = tickStep(span, 8);
     for (let v = Math.ceil(yMin / step) * step; v <= yMax; v += step) {
       const y = yPos(v);
       ctx.strokeStyle = 'rgba(255,255,255,0.07)';
