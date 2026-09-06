@@ -3673,7 +3673,7 @@ dependencies = [
 
 [[package]]
 name = "thermview"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libloading 0.8.9",
  "log",
